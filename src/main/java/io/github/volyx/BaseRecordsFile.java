@@ -12,11 +12,7 @@ public abstract class BaseRecordsFile {
     // Total length in bytes of the global database headers.
     protected static final int FILE_HEADERS_REGION_LENGTH = 16;
     // Number of bytes in the record header.
-    protected static final int RECORD_HEADER_LENGTH = 16;
-    // The length of a key in the index.
-    protected static final int MAX_KEY_LENGTH = 64;
-    // The total length of one index entry - the key length plus the record header length.
-    protected static final int INDEX_ENTRY_LENGTH = MAX_KEY_LENGTH + RECORD_HEADER_LENGTH;
+    protected static final int INDEX_ENTRY_LENGTH = 64;
     // File pointer to the num records header.
     protected static final long NUM_RECORDS_HEADER_LOCATION = 0;
     // File pointer to the data start pointer header.
@@ -31,7 +27,7 @@ public abstract class BaseRecordsFile {
             throw new IOException("Database already exits: " + dbPath);
         }
         file = new RandomAccessFile(f, "rw");
-        dataStartPtr = indexPositionToKeyFp(initialSize);  // Record Data Region starts were the
+        dataStartPtr = indexPositionToRecordHeaderFp(initialSize);  // Record Data Region starts were the
         setFileLength(dataStartPtr);                       // (i+1)th index entry would start.
         writeNumRecordsHeader(0);
         writeDataStartPtrHeader(dataStartPtr);
@@ -67,7 +63,7 @@ public abstract class BaseRecordsFile {
     /**
      * Locates space for a new record of dataLength size and initializes a RecordHeader.
      */
-    protected abstract RecordHeader allocateRecord(String key, int dataLength) throws IOException;
+    protected abstract RecordHeader allocateRecord(String key, boolean isDir, int dataLength) throws IOException;
     /**
      * Returns the record to which the target file pointer belongs - meaning the specified location
      * in the file is part of the record data of the RecordHeader which is returned.  Returns null if
@@ -110,31 +106,20 @@ public abstract class BaseRecordsFile {
     }
     /**
      * Returns a file pointer in the index pointing to the first byte
-     * in the key located at the given index position.
-     */
-    protected long indexPositionToKeyFp(int pos) {
-        return FILE_HEADERS_REGION_LENGTH + (INDEX_ENTRY_LENGTH * pos);
-    }
-    /**
-     * Returns a file pointer in the index pointing to the first byte
      * in the record pointer located at the given index position.
      */
-    long indexPositionToRecordHeaderFp(int pos) {
-        return indexPositionToKeyFp(pos) + MAX_KEY_LENGTH;
+    protected long indexPositionToRecordHeaderFp(int pos) {
+        return FILE_HEADERS_REGION_LENGTH + (INDEX_ENTRY_LENGTH * pos);
     }
-    /**
-     * Reads the ith key from the index.
-     */
-    String readKeyFromIndex(int position) throws IOException {
-        file.seek(indexPositionToKeyFp(position));
-        return file.readUTF();
-    }
+
     /**
      * Reads the ith record header from the index.
      */
     RecordHeader readRecordHeaderFromIndex(int position) throws IOException {
         file.seek(indexPositionToRecordHeaderFp(position));
-        return RecordHeader.readHeader(file);
+        RecordHeader r = new RecordHeader();
+        r.read(file);
+        return r;
     }
     /**
      * Writes the ith record header to the index.
@@ -147,13 +132,6 @@ public abstract class BaseRecordsFile {
      * Appends an entry to end of index. Assumes that insureIndexSpace() has already been called.
      */
     protected void addEntryToIndex(String key, RecordHeader newRecord, int currentNumRecords) throws IOException {
-        DbByteArrayOutputStream temp = new DbByteArrayOutputStream(MAX_KEY_LENGTH);
-        (new DataOutputStream(temp)).writeUTF(key);
-        if (temp.size() > MAX_KEY_LENGTH) {
-            throw new IOException("Key is larger than permitted size of " + MAX_KEY_LENGTH + " bytes");
-        }
-        file.seek(indexPositionToKeyFp(currentNumRecords));
-        temp.writeTo(file);
         file.seek(indexPositionToRecordHeaderFp(currentNumRecords));
         newRecord.write(file);
         newRecord.setIndexPosition(currentNumRecords);
@@ -165,11 +143,8 @@ public abstract class BaseRecordsFile {
      */
     protected void deleteEntryFromIndex(String key, RecordHeader header, int currentNumRecords) throws IOException {
         if (header.indexPosition != currentNumRecords -1) {
-            String lastKey = readKeyFromIndex(currentNumRecords-1);
-            RecordHeader last  = keyToRecordHeader(lastKey);
+            RecordHeader last = readRecordHeaderFromIndex(currentNumRecords-1);
             last.setIndexPosition(header.indexPosition);
-            file.seek(indexPositionToKeyFp(last.indexPosition));
-            file.writeUTF(lastKey);
             file.seek(indexPositionToRecordHeaderFp(last.indexPosition));
             last.write(file);
         }
@@ -178,36 +153,35 @@ public abstract class BaseRecordsFile {
     /**
      * Adds the given record to the database.
      */
-    public synchronized void insertRecord(RecordWriter rw) throws IOException {
-        String key = rw.getKey();
+    public synchronized void insertRecord(String key, boolean isDir, byte[] data) throws IOException {
         if (recordExists(key)) {
             throw new IOException("Key exists: " + key);
         }
         insureIndexSpace(getNumRecords() + 1);
-        RecordHeader newRecord = allocateRecord(key, rw.getDataLength());
-        writeRecordData(newRecord, rw);
+        RecordHeader newRecord = allocateRecord(key, isDir, data.length);
+        writeRecordData(newRecord, data);
         addEntryToIndex(key, newRecord, getNumRecords());
     }
     /**
      * Updates an existing record. If the new contents do not fit in the original record,
      * then the update is handled by deleting the old record and adding the new.
      */
-    public synchronized void updateRecord(RecordWriter rw) throws IOException {
-        RecordHeader header = keyToRecordHeader(rw.getKey());
-        if (rw.getDataLength() > header.dataCapacity) {
-            deleteRecord(rw.getKey());
-            insertRecord(rw);
+    public synchronized void updateRecord(String key, boolean isDir, byte[] data) throws IOException {
+        RecordHeader header = keyToRecordHeader(key);
+        if (data.length > header.dataCapacity) {
+            deleteRecord(key);
+            insertRecord(key, isDir, data);
         } else {
-            writeRecordData(header, rw);
+            writeRecordData(header, data);
             writeRecordHeaderToIndex(header);
         }
     }
     /**
      * Reads a record.
      */
-    public synchronized RecordReader readRecord(String key) throws IOException {
+    public synchronized Entry readRecord(String key) throws IOException {
         byte[] data = readRecordData(key);
-        return new RecordReader(key, data);
+        return new Entry(key, data);
     }
     /**
      * Reads the data for the record with the given key.
@@ -223,19 +197,6 @@ public abstract class BaseRecordsFile {
         file.seek(header.dataPointer);
         file.readFully(buf);
         return buf;
-    }
-    /**
-     * Updates the contents of the given record. A RecordsFileException is thrown if the new data does not
-     * fit in the space allocated to the record. The header's data count is updated, but not
-     * written to the file.
-     */
-    protected void writeRecordData(RecordHeader header, RecordWriter rw) throws IOException {
-        if (rw.getDataLength() > header.dataCapacity) {
-            throw new IOException ("Record data does not fit");
-        }
-        header.dataCount = rw.getDataLength();
-        file.seek(header.dataPointer);
-        rw.writeTo((DataOutput)file);
     }
     /**
      * Updates the contents of the given record. A RecordsFileException is thrown if the new data does not
@@ -293,7 +254,7 @@ public abstract class BaseRecordsFile {
     // not, space is created by moving records to the end of the file.
     protected void insureIndexSpace(int requiredNumRecords) throws IOException {
         int currentNumRecords = getNumRecords();
-        long endIndexPtr = indexPositionToKeyFp(requiredNumRecords);
+        long endIndexPtr = indexPositionToRecordHeaderFp(requiredNumRecords);
         if (endIndexPtr > getFileLength() && currentNumRecords == 0) {
             setFileLength(endIndexPtr);
             dataStartPtr = endIndexPtr;

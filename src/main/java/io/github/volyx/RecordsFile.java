@@ -26,10 +26,9 @@ public class RecordsFile extends BaseRecordsFile {
         int numRecords = readNumRecordsHeader();
         memIndex = new Hashtable(numRecords);
         for (int i = 0; i < numRecords; i++) {
-            String key = readKeyFromIndex(i);
             RecordHeader header = readRecordHeaderFromIndex(i);
             header.setIndexPosition(i);
-            memIndex.put(key, header);
+            memIndex.put(header.name, header);
         }
     }
     /**
@@ -64,7 +63,7 @@ public class RecordsFile extends BaseRecordsFile {
      * This method searches the file for free space and then returns a RecordHeader
      * which uses the space. (O(n) memory accesses)
      */
-    protected RecordHeader allocateRecord(String key, int dataLength) throws IOException {
+    protected RecordHeader allocateRecord(String key, boolean isDir, int dataLength) throws IOException {
         // search for empty space
         RecordHeader newRecord = null;
         Enumeration e = memIndex.elements();
@@ -81,7 +80,7 @@ public class RecordsFile extends BaseRecordsFile {
             // append record to end of file - grows file to allocate space
             long fp = getFileLength();
             setFileLength(fp + dataLength);
-            newRecord = new RecordHeader(fp, dataLength);
+            newRecord = new RecordHeader(key, isDir, fp, dataLength);
         }
         return newRecord;
     }

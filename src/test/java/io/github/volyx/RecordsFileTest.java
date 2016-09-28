@@ -25,16 +25,12 @@ public class RecordsFileTest {
     @Test
     public void test1() throws IOException, ClassNotFoundException {
 
-        final String key = "foo.lastAccessTime-" + UUID.randomUUID().toString();
-        RecordWriter rw = new RecordWriter(key);
-        Date date = new Date();
-        rw.writeObject(date);
-        recordsFile.insertRecord(rw);
+        final String key = "superDir" + UUID.randomUUID().toString();
+        String data = "Hello world!";
+        recordsFile.insertRecord(key, true, data.getBytes());
 
-        RecordReader rr = recordsFile.readRecord(key);
-        Date d = (Date)rr.readObject();
+        Entry entry = recordsFile.readRecord(key);
 
-        Assert.assertEquals(date, d);
-        System.out.println("last access was at: " + d.toString());
+        System.out.println("Result: " + new String(entry.data));
     }
 }
